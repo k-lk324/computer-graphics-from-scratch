@@ -172,30 +172,21 @@ def rasterize(
 ) -> np.ndarray:
     """
     Map 2D points on the camera plane (size = plane_w x plane_h,
-    centered at (0,0)) to pixel indices in an image of size res_w x res_h.
+    centered at (0,0)) to pixel coordinates in an image of size res_w x res_h.
     Input:
         pts_2d: (2xN) array of (x', y') in plane coordinates
         plane_w, plane_h: floats, width and height of camera plane
         res_w, res_h: ints, image resolution
     Output:
-        pix: (Nx2) integer array of pixel indices (u, v).
+        pix: (Nx2) floating-point array of continuous pixel coordinates (u, v).
     """
     x = pts_2d[0, :]
     y = pts_2d[1, :]
 
-    # Normalize from plane coords to [0..1], then scale to [0..res_w-1] etc.
     u = ((x + (plane_w / 2.0)) / plane_w) * (res_w - 1)
-    y = -y  # Flip y-axis
-    v = ((y + (plane_h / 2.0)) / plane_h) * (res_h - 1)
+    v = (((plane_h / 2.0) - y) / plane_h) * (res_h - 1)
 
-    u_int = np.round(u).astype(np.int32)
-    v_int = np.round(v).astype(np.int32)
-
-    # Clip into image bounds
-    u_clipped = np.clip(u_int, 0, res_w - 1)
-    v_clipped = np.clip(v_int, 0, res_h - 1)
-
-    pix = np.vstack([u_clipped, v_clipped]).T
+    pix = np.vstack([u, v]).T
     return pix
 
 

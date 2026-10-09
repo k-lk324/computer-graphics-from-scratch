@@ -314,6 +314,9 @@ def shade_gouraud(
     y_min = max(int(np.floor(np.min(v_pos[:, 1]))), 0)
     y_max = min(int(np.ceil(np.max(v_pos[:, 1]))), res_h - 1)
 
+    if x_min > x_max or y_min > y_max:
+        return img
+
     for y in range(y_min, y_max + 1):
         for x in range(x_min, x_max + 1):
             epsilon = 1e-4
@@ -351,6 +354,9 @@ def shade_phong(
     x_max = min(int(np.ceil(np.max(v_pos[:, 0]))), res_w - 1)
     y_min = max(int(np.floor(np.min(v_pos[:, 1]))), 0)
     y_max = min(int(np.ceil(np.max(v_pos[:, 1]))), res_h - 1)
+
+    if x_min > x_max or y_min > y_max:
+        return img
 
     for y in range(y_min, y_max + 1):
         for x in range(x_min, x_max + 1):
@@ -394,6 +400,108 @@ def shade_phong(
     return img
 
 
+def clip_triangle_near_plane(
+    cam_v: np.ndarray,
+    world_v: np.ndarray,
+    nrm_v: np.ndarray,
+    uv_v: np.ndarray,
+    z_near: float = 1e-2,
+) -> List[Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
+    """
+    Clip a triangle against the camera near plane (d >= z_near, where d = -Z_c).
+    Returns a list of clipped triangles: (cam_pts, world_pts, normals, uvs, depths).
+    """
+    d = -cam_v[:, 2]
+    inside = d >= z_near
+    num_inside = int(np.sum(inside))
+
+    if num_inside == 0:
+        return []
+
+    if num_inside == 3:
+        return [(cam_v, world_v, nrm_v, uv_v, d)]
+
+    def intersect(idx_a: int, idx_b: int):
+        da, db = d[idx_a], d[idx_b]
+        t = (z_near - da) / (db - da)
+        c_p = cam_v[idx_a] + t * (cam_v[idx_b] - cam_v[idx_a])
+        w_p = world_v[idx_a] + t * (world_v[idx_b] - world_v[idx_a])
+        n_p = nrm_v[idx_a] + t * (nrm_v[idx_b] - nrm_v[idx_a])
+        norm_len = np.linalg.norm(n_p)
+        if norm_len > 0:
+            n_p /= norm_len
+        u_p = uv_v[idx_a] + t * (uv_v[idx_b] - uv_v[idx_a])
+        return c_p, w_p, n_p, u_p, z_near
+
+    if num_inside == 1:
+        in_idx = int(np.where(inside)[0][0])
+        out_idx1 = (in_idx + 1) % 3
+        out_idx2 = (in_idx + 2) % 3
+
+        p1_c, p1_w, p1_n, p1_u, p1_d = intersect(in_idx, out_idx1)
+        p2_c, p2_w, p2_n, p2_u, p2_d = intersect(in_idx, out_idx2)
+
+        c_tri = np.vstack([cam_v[in_idx], p1_c, p2_c])
+        w_tri = np.vstack([world_v[in_idx], p1_w, p2_w])
+        n_tri = np.vstack([nrm_v[in_idx], p1_n, p2_n])
+        u_tri = np.vstack([uv_v[in_idx], p1_u, p2_u])
+        d_tri = np.array([d[in_idx], p1_d, p2_d], dtype=np.float64)
+
+        return [(c_tri, w_tri, n_tri, u_tri, d_tri)]
+
+    # num_inside == 2
+    out_idx = int(np.where(~inside)[0][0])
+    in_idx1 = (out_idx + 1) % 3
+    in_idx2 = (out_idx + 2) % 3
+
+    p1_c, p1_w, p1_n, p1_u, p1_d = intersect(in_idx1, out_idx)
+    p2_c, p2_w, p2_n, p2_u, p2_d = intersect(in_idx2, out_idx)
+
+    c_tri1 = np.vstack([cam_v[in_idx1], cam_v[in_idx2], p1_c])
+    w_tri1 = np.vstack([world_v[in_idx1], world_v[in_idx2], p1_w])
+    n_tri1 = np.vstack([nrm_v[in_idx1], nrm_v[in_idx2], p1_n])
+    u_tri1 = np.vstack([uv_v[in_idx1], uv_v[in_idx2], p1_u])
+    d_tri1 = np.array([d[in_idx1], d[in_idx2], p1_d], dtype=np.float64)
+
+    c_tri2 = np.vstack([cam_v[in_idx2], p2_c, p1_c])
+    w_tri2 = np.vstack([world_v[in_idx2], p2_w, p1_w])
+    n_tri2 = np.vstack([nrm_v[in_idx2], p2_n, p1_n])
+    u_tri2 = np.vstack([uv_v[in_idx2], p2_u, p1_u])
+    d_tri2 = np.array([d[in_idx2], p2_d, p1_d], dtype=np.float64)
+
+    return [
+        (c_tri1, w_tri1, n_tri1, u_tri1, d_tri1),
+        (c_tri2, w_tri2, n_tri2, u_tri2, d_tri2),
+    ]
+
+
+def project_camera_to_screen(
+    cam_pts: np.ndarray,
+    focal: float,
+    plane_w: float,
+    plane_h: float,
+    res_w: int,
+    res_h: int,
+) -> np.ndarray:
+    """
+    Project camera-space points to continuous 2D subpixel screen coordinates.
+    """
+    Xc = cam_pts[:, 0]
+    Yc = cam_pts[:, 1]
+    Zc = cam_pts[:, 2]
+
+    x_proj = (focal * Xc) / Zc
+    y_proj = (focal * Yc) / Zc
+
+    scale_x = res_w / plane_w
+    scale_y = res_h / plane_h
+
+    u_screen = (x_proj + (plane_w / 2.0)) * scale_x
+    v_screen = ((plane_h / 2.0) - y_proj) * scale_y
+
+    return np.vstack([u_screen, v_screen]).T
+
+
 def render_object(
     v_pos: np.ndarray,  # 3 x Nv (3D vertex positions)
     v_uvs: np.ndarray,  # 2 x Nv
@@ -414,8 +522,10 @@ def render_object(
     shader: str,
 ) -> np.ndarray:
     """
-    Render a 3D object using a Z-buffer for depth testing.
+    Render a 3D object using a Z-buffer with near-plane clipping and subpixel precision.
     """
+    validate_mesh(v_pos, t_pos_idx)
+
     # Compute camera basis
     z_axis = (eye - target).reshape(3)
     z_axis /= np.linalg.norm(z_axis)
@@ -425,23 +535,8 @@ def render_object(
     R = np.stack([x_axis, y_axis, z_axis], axis=0)  # 3x3
     t = -R @ eye.reshape(3)  # 3,
 
-    # Project vertices
-    verts2d, depth = perspective_project(v_pos, focal, R, t)  # 2 x Nv, (Nv,)
-    verts2d = verts2d.T  # Nv x 2
-    depth = depth.T  # Nv
-
-    # Convert to pixel coords
-    scale_x = res_w / plane_w
-    scale_y = res_h / plane_h
-    verts2d[:, 0] = (verts2d[:, 0] + plane_w / 2) * scale_x
-    verts2d[:, 1] = (plane_h / 2 - verts2d[:, 1]) * scale_y
-    verts2d = np.round(verts2d).astype(int)
-
-    # Clamp to image bounds
-    verts2d[:, 0] = np.clip(verts2d[:, 0], 0, res_w - 1)
-    verts2d[:, 1] = np.clip(verts2d[:, 1], 0, res_h - 1)
-
-    validate_mesh(v_pos, t_pos_idx)
+    # Transform all vertices into camera coordinates
+    cam_all = (R @ v_pos + t.reshape(3, 1)).T  # (Nv, 3)
 
     # Compute normals per vertex
     normals = calc_normals(v_pos, t_pos_idx)  # 3 x Nv
@@ -449,64 +544,56 @@ def render_object(
     # Initialize depth buffer with infinity
     depth_buffer = np.full((res_h, res_w), np.inf, dtype=np.float64)
 
-    # Positive distance: d = -Z_c for negative-Z camera convention
-    vertex_distances = -depth if np.all(depth < 0) else np.abs(depth)
-
     # Initialize image with white background
     img = np.ones((res_h, res_w, 3), dtype=np.float32)
 
     for triangle in t_pos_idx:
-        idx = triangle  # 3 vertex indices of this triangle
+        idx = triangle  # 3 vertex indices
+        tri_cam = cam_all[idx]  # (3, 3)
+        tri_world = v_pos[:, idx].T  # (3, 3)
+        tri_nrm = normals[:, idx].T  # (3, 3)
+        tri_uv = v_uvs[idx]  # (3, 2)
 
-        # Projected 2D positions for rasterization
-        v_proj = verts2d[idx, :]  # 3 x 2 (integer pixel coords)
+        clipped_triangles = clip_triangle_near_plane(tri_cam, tri_world, tri_nrm, tri_uv, z_near=1e-2)
 
-        # Normals of the 3 vertices (3 x 3)
-        v_nrm = normals[:, idx].T  # shape: (3 vertices, 3 components)
+        for c_pts, w_pts, n_pts, u_pts, d_pts in clipped_triangles:
+            v_proj = project_camera_to_screen(c_pts, focal, plane_w, plane_h, res_w, res_h)
 
-        # Texture UV coords of the 3 vertices (3 x 2)
-        v_uv = v_uvs[idx]  # shape: (3 vertices, 2 components)
-
-        # Original 3D vertex positions of the triangle (3 x 3)
-        v_pos_3d = v_pos[:, idx].T  # shape: (3 vertices, 3 components)
-
-        # Vertex distances for depth interpolation (3,)
-        v_depth = vertex_distances[idx]
-
-        if shader == "gouraud":
-            img = shade_gouraud(
-                v_proj,
-                v_pos_3d,
-                v_nrm,
-                v_uv,
-                tex,
-                eye.reshape(3),
-                mat,
-                l_pos,
-                l_int,
-                l_amb,
-                img,
-                v_depth,
-                depth_buffer,
-            )
-        elif shader == "phong":
-            img = shade_phong(
-                v_proj,
-                v_pos_3d,
-                v_nrm,
-                v_uv,
-                tex,
-                eye.reshape(3),
-                mat,
-                l_pos,
-                l_int,
-                l_amb,
-                img,
-                v_depth,
-                depth_buffer,
-            )
-        else:
-            raise ValueError(f"Unknown shader: {shader}")
+            if shader == "gouraud":
+                img = shade_gouraud(
+                    v_proj,
+                    w_pts,
+                    n_pts,
+                    u_pts,
+                    tex,
+                    eye.reshape(3),
+                    mat,
+                    l_pos,
+                    l_int,
+                    l_amb,
+                    img,
+                    d_pts,
+                    depth_buffer,
+                )
+            elif shader == "phong":
+                img = shade_phong(
+                    v_proj,
+                    w_pts,
+                    n_pts,
+                    u_pts,
+                    tex,
+                    eye.reshape(3),
+                    mat,
+                    l_pos,
+                    l_int,
+                    l_amb,
+                    img,
+                    d_pts,
+                    depth_buffer,
+                )
+            else:
+                raise ValueError(f"Unknown shader: {shader}")
 
     return img
+
 
