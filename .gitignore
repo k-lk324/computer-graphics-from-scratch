@@ -1,0 +1,14 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Test & coverage caches
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Generated outputs
+output/
+*_frames/
