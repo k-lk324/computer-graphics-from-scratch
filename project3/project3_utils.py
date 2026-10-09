@@ -137,61 +137,66 @@ def light(
     return pt_l
 
 
+def validate_mesh(pts: np.ndarray, t_pos_idx: np.ndarray) -> None:
+    """
+    Validate mesh dimensions, integer index types, and vertex index bounds.
+    """
+    if pts.ndim != 2 or pts.shape[0] != 3:
+        raise ValueError(f"pts must have shape (3, Nv), got {pts.shape}")
+    if t_pos_idx.ndim != 2 or t_pos_idx.shape[1] != 3:
+        raise ValueError(f"t_pos_idx must have shape (Nt, 3), got {t_pos_idx.shape}")
+    if not np.issubdtype(t_pos_idx.dtype, np.integer):
+        raise ValueError(f"t_pos_idx must have integer dtype, got {t_pos_idx.dtype}")
+    if np.any(t_pos_idx < 0):
+        raise ValueError("t_pos_idx contains negative indices")
+    if np.any(t_pos_idx >= pts.shape[1]):
+        raise ValueError(
+            f"t_pos_idx contains index out of range for mesh with {pts.shape[1]} vertices"
+        )
+
+
 def calc_normals(pts: np.ndarray, t_pos_idx: np.ndarray) -> np.ndarray:
     """
     Calculate normals per vertex of a triangle mesh.
 
     Parameters:
     - pts: (3, Nv) array of vertex coordinates
-    - t_pos_idx: (3, NT) array of triangle vertex indices (1-based)
+    - t_pos_idx: (Nt, 3) array of triangle vertex indices
 
     Returns:
     - nrm: (3, Nv) array of normalized vertex normals
     """
+    validate_mesh(pts, t_pos_idx)
 
-    # Number of vertices and triangles
-    _, Nv = pts.shape
-    _, NT = t_pos_idx.shape
+    num_vertices = pts.shape[1]
+    normals_acc = np.zeros((3, num_vertices), dtype=np.float64)
 
-    # Initialize normals accumulator array
-    normals_acc = np.zeros((3, Nv), dtype=np.float64)
+    for triangle in t_pos_idx:
+        i0, i1, i2 = triangle
+        v0 = pts[:, i0]
+        v1 = pts[:, i1]
+        v2 = pts[:, i2]
 
-    # Convert 1-based indices to 0-based for Python indexing
-    triangles = t_pos_idx - 1
-
-    # For each triangle, compute face normal and add to each vertex normal accumulator
-    for k in range(NT):
-        idx = triangles[:, k]  # Indices of the vertices of triangle k
-
-        # Extract vertex positions for this triangle
-        v0 = pts[:, idx[0]]
-        v1 = pts[:, idx[1]]
-        v2 = pts[:, idx[2]]
-
-        # Compute two edges of the triangle
         edge1 = v1 - v0
         edge2 = v2 - v0
-
-        # Compute face normal using right-hand rule (cross product)
         face_normal = np.cross(edge1, edge2)
 
-        # Normalize face normal to unit length (if non-zero)
         norm_len = np.linalg.norm(face_normal)
-        if norm_len > 0:
-            face_normal /= norm_len
+        if norm_len <= 1e-8:
+            continue
 
-        # Add face normal to each vertex normal accumulator
-        for vertex_idx in idx:
-            normals_acc[:, vertex_idx] += face_normal
+        face_normal = face_normal / norm_len
 
-    # Normalize accumulated vertex normals to unit length
-    for v in range(Nv):
+        normals_acc[:, i0] += face_normal
+        normals_acc[:, i1] += face_normal
+        normals_acc[:, i2] += face_normal
+
+    for v in range(num_vertices):
         norm_len = np.linalg.norm(normals_acc[:, v])
-        if norm_len > 0:
+        if norm_len > 1e-8:
             normals_acc[:, v] /= norm_len
         else:
-            # Isolated vertex or degenerate, assign default normal
-            normals_acc[:, v] = np.array([0.0, 0.0, 1.0])
+            normals_acc[:, v] = np.array([0.0, 0.0, 1.0], dtype=np.float64)
 
     return normals_acc
 
@@ -380,21 +385,22 @@ def render_object(
     verts2d[:, 0] = np.clip(verts2d[:, 0], 0, res_w - 1)
     verts2d[:, 1] = np.clip(verts2d[:, 1], 0, res_h - 1)
 
+    validate_mesh(v_pos, t_pos_idx)
+
     # Compute normals per vertex
     normals = calc_normals(v_pos, t_pos_idx)  # 3 x Nv
 
-    # Convert indices from 1-based to 0-based
-    face_indices = (t_pos_idx - 1).T  # 3 x NT
+    face_indices = t_pos_idx
 
     # Sort faces by average depth for correct rendering order
-    mean_depths = np.mean(depth[face_indices], axis=0)  # (NT,)
+    mean_depths = np.mean(depth[face_indices], axis=1)  # (Nt,)
     sorted_faces = np.argsort(-mean_depths)  # farthest to nearest
 
     # Initialize image with white background
     img = np.ones((res_h, res_w, 3), dtype=np.float32)
 
     for tri_idx in sorted_faces:
-        idx = face_indices[:, tri_idx].T  # 3 vertex indices of this triangle
+        idx = face_indices[tri_idx]  # 3 vertex indices of this triangle
 
         # Projected 2D positions for rasterization
         v_proj = verts2d[idx, :]  # 3 x 2 (integer pixel coords)
