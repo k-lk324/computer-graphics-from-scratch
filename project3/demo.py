@@ -6,7 +6,8 @@ import cv2
 from project3_utils import MatPhong, render_object
 
 def save_img(arr, name):
-    cv2.imwrite(name, (arr).astype(np.uint8))
+    img = np.clip(arr, 0, 255).astype(np.uint8)
+    cv2.imwrite(name, cv2.cvtColor(img, cv2.COLOR_RGB2BGR))
 
 def main():
     tex_im  = np.array(Image.open("../assets/project3/Mona-Lisa-Exist-in-Real-Life-2635825581.jpg"))  # HxWx3
