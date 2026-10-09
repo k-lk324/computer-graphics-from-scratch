@@ -253,6 +253,19 @@ def update_depth_buffer(
     return False
 
 
+def sample_texture(tex: np.ndarray, u: float, v: float) -> np.ndarray:
+    """
+    Sample RGB color from texture image at UV coordinates (u, v) in range [0, 1].
+    Uses standard (1.0 - v) flip for top-down image coordinates and returns [0, 1] float.
+    """
+    tex_h, tex_w, _ = tex.shape
+    u_clipped = float(np.clip(u, 0.0, 1.0))
+    v_clipped = float(np.clip(v, 0.0, 1.0))
+    tex_x = int(round(u_clipped * (tex_w - 1)))
+    tex_y = int(round((1.0 - v_clipped) * (tex_h - 1)))
+    return (tex[tex_y, tex_x] / 255.0).astype(np.float64)
+
+
 def shade_gouraud(
     v_pos: np.ndarray,  # (3, 2) projected 2D positions
     v_pos_3d: np.ndarray,  # (3, 3) original 3D vertex positions (world space)
@@ -269,15 +282,12 @@ def shade_gouraud(
     depth_buffer: np.ndarray,  # (res_h, res_w) depth buffer
 ) -> np.ndarray:
     res_h, res_w, _ = img.shape
-    tex_h, tex_w, _ = tex.shape
 
     vert_colors = []
     for i in range(3):
         u, v = v_uvs[i]
-        u_px = min(int(u * (tex_w - 1)), tex_w - 1)
-        v_px = min(int((1 - v) * (tex_h - 1)), tex_h - 1)
+        tex_color = sample_texture(tex, u, v)
 
-        tex_color = tex[v_px, u_px] / 255.0
         nrm = v_nrm[i]
         norm_len = np.linalg.norm(nrm)
         if norm_len > 0:
@@ -321,6 +331,7 @@ def shade_gouraud(
 
 def shade_phong(
     v_pos: np.ndarray,  # (3, 2) 2D projected positions
+    v_pos_3d: np.ndarray,  # (3, 3) original 3D vertex positions (world space)
     v_nrm: np.ndarray,  # (3, 3) vertex normals
     v_uvs: np.ndarray,  # (3, 2) UV coords
     tex: np.ndarray,  # (H, W, 3)
@@ -334,7 +345,6 @@ def shade_phong(
     depth_buffer: np.ndarray,  # (res_h, res_w) depth buffer
 ) -> np.ndarray:
     res_h, res_w, _ = img.shape
-    tex_h, tex_w, _ = tex.shape
 
     a, b, c = v_pos[0], v_pos[1], v_pos[2]
     x_min = max(int(np.floor(np.min(v_pos[:, 0]))), 0)
@@ -351,20 +361,27 @@ def shade_phong(
 
             pixel_depth = interpolate_perspective_depth(bc, v_depth)
             if update_depth_buffer(depth_buffer, x, y, pixel_depth):
-                interp_nrm = bc @ v_nrm
-                norm_len = np.linalg.norm(interp_nrm)
-                if norm_len > 0:
-                    interp_nrm /= norm_len
+                # Perspective-correct barycentric interpolation
+                weights = bc / v_depth
+                weight_sum = weights.sum()
+                if weight_sum <= 0.0:
+                    continue
+                weights /= weight_sum
 
-                interp_uv = bc @ v_uvs
-                u, v = interp_uv
-                u_px = min(int(u * (tex_w - 1)), tex_w - 1)
-                v_px = min(int((1 - v) * (tex_h - 1)), tex_h - 1)
-                tex_color = tex[v_px, u_px] / 255.0
+                interp_position = weights @ v_pos_3d
+                interp_normal = weights @ v_nrm
+                interp_uv = weights @ v_uvs
+
+                norm = np.linalg.norm(interp_normal)
+                if norm < 1e-12:
+                    continue
+                interp_normal /= norm
+
+                tex_color = sample_texture(tex, interp_uv[0], interp_uv[1])
 
                 color = light(
-                    pt=np.array([0.0, 0.0, 0.0]),
-                    nrm=interp_nrm,
+                    pt=interp_position,
+                    nrm=interp_normal,
                     vclr=tex_color,
                     cam_pos=cam_pos,
                     mat=mat,
@@ -475,6 +492,7 @@ def render_object(
         elif shader == "phong":
             img = shade_phong(
                 v_proj,
+                v_pos_3d,
                 v_nrm,
                 v_uv,
                 tex,
