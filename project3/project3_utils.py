@@ -1,11 +1,26 @@
 # project3_utils.py
 
+import sys
+import types
+from typing import List, Tuple, Union
 import numpy as np
-from typing import Union, List, Tuple
-from project2_utils import perspective_project, lookat, rasterize
 from PIL import Image
-import numpy as np
-from typing import Union, List
+from project2_utils import lookat, perspective_project, rasterize
+
+if "trimesh" not in sys.modules:
+    try:
+        import trimesh  # noqa: F401
+    except ImportError:
+        trimesh_module = types.ModuleType("trimesh")
+        caching_module = types.ModuleType("trimesh.caching")
+
+        class TrackedArray(np.ndarray):
+            pass
+
+        caching_module.TrackedArray = TrackedArray
+        trimesh_module.caching = caching_module
+        sys.modules["trimesh"] = trimesh_module
+        sys.modules["trimesh.caching"] = caching_module
 
 
 class MatPhong:
@@ -202,71 +217,7 @@ def calc_normals(pts: np.ndarray, t_pos_idx: np.ndarray) -> np.ndarray:
 
 
 
-def shade_gouraud(
-    v_pos: np.ndarray,  # (3,3) projected 2D positions (or 3D camera space positions)
-    v_pos_3d: np.ndarray,  # (3,3) original 3D vertex positions (world space)
-    v_nrm: np.ndarray,  # (3,3) vertex normals
-    v_uvs: np.ndarray,  # (3,2) texture coordinates
-    tex: np.ndarray,  # texture image (HxWx3)
-    cam_pos: np.ndarray,  # (3,) camera position
-    mat: MatPhong,
-    l_pos: Union[np.ndarray, List[np.ndarray]],
-    l_int: Union[np.ndarray, List[np.ndarray]],
-    l_amb: np.ndarray,
-    img: np.ndarray,  # (res_h, res_w, 3)
-) -> np.ndarray:
-    res_h, res_w, _ = img.shape
-    updated_img = img.copy()
-    tex_h, tex_w, _ = tex.shape
-
-    vert_colors = []
-    for i in range(3):
-        u, v = v_uvs[i]
-        u_px = min(int(u * (tex_w - 1)), tex_w - 1)
-        v_px = min(
-            int((1 - v) * (tex_h - 1)), tex_h - 1
-        )  # flip v to match image coords
-
-        tex_color = tex[v_px, u_px] / 255.0  # normalize to [0,1]
-
-        nrm = v_nrm[i]
-        nrm = nrm / np.linalg.norm(nrm)  # normalize normal
-
-        pt_3d = v_pos_3d[i]  # use original 3D position here
-
-        c = light(
-            pt=pt_3d,
-            nrm=nrm,
-            vclr=tex_color,
-            cam_pos=cam_pos,
-            mat=mat,
-            l_pos=l_pos,
-            l_int=l_int,
-            l_amb=l_amb,
-        )
-        vert_colors.append(c)
-    vert_colors = np.array(vert_colors)  # shape (3,3)
-
-    a, b, c = v_pos[0], v_pos[1], v_pos[2]
-    x_min = max(int(np.floor(np.min(v_pos[:, 0]))), 0)
-    x_max = min(int(np.ceil(np.max(v_pos[:, 0]))), res_w - 1)
-    y_min = max(int(np.floor(np.min(v_pos[:, 1]))), 0)
-    y_max = min(int(np.ceil(np.max(v_pos[:, 1]))), res_h - 1)
-
-    for y in range(y_min, y_max + 1):
-        for x in range(x_min, x_max + 1):
-            epsilon = 1e-4
-            bc = barycentric_coords(np.array([x + 0.5, y + 0.5], dtype=np.float32), a, b, c)
-            if bc is None or np.any(bc < -epsilon):
-                print(f"Skipping pixel ({x}, {y}) due to invalid barycentric coords")
-                continue
-            color = bc @ vert_colors  # interpolate colors
-            updated_img[y, x] = color
-
-    return updated_img
-
-
-def barycentric_coords(p, a, b, c):
+def barycentric_coords(p: np.ndarray, a: np.ndarray, b: np.ndarray, c: np.ndarray) -> Union[np.ndarray, None]:
     """Compute barycentric coordinates of point p with respect to triangle abc."""
     v0 = b - a
     v1 = c - a
@@ -285,6 +236,106 @@ def barycentric_coords(p, a, b, c):
     return np.array([u, v, w], dtype=np.float32)
 
 
+def interpolate_perspective_depth(
+    barycentric_coords: np.ndarray,
+    vertex_distances: np.ndarray,
+) -> float:
+    """
+    Interpolate reciprocal depth in perspective projection using screen-space barycentric weights.
+    d_pixel = 1 / (lambda_0 / d_0 + lambda_1 / d_1 + lambda_2 / d_2)
+    """
+    inv_depth: float = float(
+        barycentric_coords[0] / vertex_distances[0]
+        + barycentric_coords[1] / vertex_distances[1]
+        + barycentric_coords[2] / vertex_distances[2]
+    )
+    if inv_depth <= 0.0:
+        return float(np.inf)
+    return 1.0 / inv_depth
+
+
+def update_depth_buffer(
+    depth_buffer: np.ndarray,
+    x: int,
+    y: int,
+    pixel_depth: float,
+) -> bool:
+    """
+    Test and update depth buffer at coordinate (y, x).
+    Returns True if pixel_depth is nearer than depth_buffer[y, x].
+    """
+    if pixel_depth < depth_buffer[y, x]:
+        depth_buffer[y, x] = pixel_depth
+        return True
+    return False
+
+
+def shade_gouraud(
+    v_pos: np.ndarray,  # (3, 2) projected 2D positions
+    v_pos_3d: np.ndarray,  # (3, 3) original 3D vertex positions (world space)
+    v_nrm: np.ndarray,  # (3, 3) vertex normals
+    v_uvs: np.ndarray,  # (3, 2) texture coordinates
+    tex: np.ndarray,  # texture image (HxWx3)
+    cam_pos: np.ndarray,  # (3,) camera position
+    mat: MatPhong,
+    l_pos: Union[np.ndarray, List[np.ndarray]],
+    l_int: Union[np.ndarray, List[np.ndarray]],
+    l_amb: np.ndarray,
+    img: np.ndarray,  # (res_h, res_w, 3)
+    v_depth: np.ndarray,  # (3,) vertex distances along camera line of sight
+    depth_buffer: np.ndarray,  # (res_h, res_w) depth buffer
+) -> np.ndarray:
+    res_h, res_w, _ = img.shape
+    tex_h, tex_w, _ = tex.shape
+
+    vert_colors = []
+    for i in range(3):
+        u, v = v_uvs[i]
+        u_px = min(int(u * (tex_w - 1)), tex_w - 1)
+        v_px = min(int((1 - v) * (tex_h - 1)), tex_h - 1)
+
+        tex_color = tex[v_px, u_px] / 255.0
+        nrm = v_nrm[i]
+        norm_len = np.linalg.norm(nrm)
+        if norm_len > 0:
+            nrm = nrm / norm_len
+
+        pt_3d = v_pos_3d[i]
+
+        c = light(
+            pt=pt_3d,
+            nrm=nrm,
+            vclr=tex_color,
+            cam_pos=cam_pos,
+            mat=mat,
+            l_pos=l_pos,
+            l_int=l_int,
+            l_amb=l_amb,
+        )
+        vert_colors.append(c)
+    vert_colors = np.array(vert_colors)  # shape (3, 3)
+
+    a, b, c = v_pos[0], v_pos[1], v_pos[2]
+    x_min = max(int(np.floor(np.min(v_pos[:, 0]))), 0)
+    x_max = min(int(np.ceil(np.max(v_pos[:, 0]))), res_w - 1)
+    y_min = max(int(np.floor(np.min(v_pos[:, 1]))), 0)
+    y_max = min(int(np.ceil(np.max(v_pos[:, 1]))), res_h - 1)
+
+    for y in range(y_min, y_max + 1):
+        for x in range(x_min, x_max + 1):
+            epsilon = 1e-4
+            bc = barycentric_coords(np.array([x + 0.5, y + 0.5], dtype=np.float32), a, b, c)
+            if bc is None or np.any(bc < -epsilon):
+                continue
+
+            pixel_depth = interpolate_perspective_depth(bc, v_depth)
+            if update_depth_buffer(depth_buffer, x, y, pixel_depth):
+                color = bc @ vert_colors
+                img[y, x] = color
+
+    return img
+
+
 def shade_phong(
     v_pos: np.ndarray,  # (3, 2) 2D projected positions
     v_nrm: np.ndarray,  # (3, 3) vertex normals
@@ -296,9 +347,10 @@ def shade_phong(
     l_int: Union[np.ndarray, List[np.ndarray]],
     l_amb: np.ndarray,
     img: np.ndarray,  # (res_h, res_w, 3)
+    v_depth: np.ndarray,  # (3,) vertex distances along camera line of sight
+    depth_buffer: np.ndarray,  # (res_h, res_w) depth buffer
 ) -> np.ndarray:
     res_h, res_w, _ = img.shape
-    updated_img = img.copy()
     tex_h, tex_w, _ = tex.shape
 
     a, b, c = v_pos[0], v_pos[1], v_pos[2]
@@ -309,39 +361,43 @@ def shade_phong(
 
     for y in range(y_min, y_max + 1):
         for x in range(x_min, x_max + 1):
-            bc = barycentric_coords(np.array([x, y]), a, b, c)
-            if bc is None or np.any(bc < 0):
+            epsilon = 1e-4
+            bc = barycentric_coords(np.array([x + 0.5, y + 0.5], dtype=np.float32), a, b, c)
+            if bc is None or np.any(bc < -epsilon):
                 continue
 
-            # Interpolate normal and UV
-            interp_nrm = bc @ v_nrm
-            interp_nrm /= np.linalg.norm(interp_nrm)
+            pixel_depth = interpolate_perspective_depth(bc, v_depth)
+            if update_depth_buffer(depth_buffer, x, y, pixel_depth):
+                interp_nrm = bc @ v_nrm
+                norm_len = np.linalg.norm(interp_nrm)
+                if norm_len > 0:
+                    interp_nrm /= norm_len
 
-            interp_uv = bc @ v_uvs
-            u, v = interp_uv
-            u_px = min(int(u * (tex_w - 1)), tex_w - 1)
-            v_px = min(int(v * (tex_h - 1)), tex_h - 1)
-            tex_color = tex[v_px, u_px] / 255.0  # Normalize
+                interp_uv = bc @ v_uvs
+                u, v = interp_uv
+                u_px = min(int(u * (tex_w - 1)), tex_w - 1)
+                v_px = min(int((1 - v) * (tex_h - 1)), tex_h - 1)
+                tex_color = tex[v_px, u_px] / 255.0
 
-            color = light(
-                pt=np.array([0.0, 0.0, 0.0]),  # Placeholder for projected pt
-                nrm=interp_nrm,
-                vclr=tex_color,
-                cam_pos=cam_pos,
-                mat=mat,
-                l_pos=l_pos,
-                l_int=l_int,
-                l_amb=l_amb,
-            )
-            updated_img[y, x] = np.clip(color, 0, 1)
+                color = light(
+                    pt=np.array([0.0, 0.0, 0.0]),
+                    nrm=interp_nrm,
+                    vclr=tex_color,
+                    cam_pos=cam_pos,
+                    mat=mat,
+                    l_pos=l_pos,
+                    l_int=l_int,
+                    l_amb=l_amb,
+                )
+                img[y, x] = np.clip(color, 0, 1)
 
-    return updated_img
+    return img
 
 
 def render_object(
     v_pos: np.ndarray,  # 3 x Nv (3D vertex positions)
     v_uvs: np.ndarray,  # 2 x Nv
-    t_pos_idx: np.ndarray,  # 3 x NT, 1-based indices
+    t_pos_idx: np.ndarray,  # Nt x 3, 0-based indices
     tex: np.ndarray,  # H x W x 3 texture image
     plane_h: int,
     plane_w: int,
@@ -358,7 +414,7 @@ def render_object(
     shader: str,
 ) -> np.ndarray:
     """
-    Render a 3D object with given parameters.
+    Render a 3D object using a Z-buffer for depth testing.
     """
     # Compute camera basis
     z_axis = (eye - target).reshape(3)
@@ -390,22 +446,22 @@ def render_object(
     # Compute normals per vertex
     normals = calc_normals(v_pos, t_pos_idx)  # 3 x Nv
 
-    face_indices = t_pos_idx
+    # Initialize depth buffer with infinity
+    depth_buffer = np.full((res_h, res_w), np.inf, dtype=np.float64)
 
-    # Sort faces by average depth for correct rendering order
-    mean_depths = np.mean(depth[face_indices], axis=1)  # (Nt,)
-    sorted_faces = np.argsort(-mean_depths)  # farthest to nearest
+    # Positive distance: d = -Z_c for negative-Z camera convention
+    vertex_distances = -depth if np.all(depth < 0) else np.abs(depth)
 
     # Initialize image with white background
     img = np.ones((res_h, res_w, 3), dtype=np.float32)
 
-    for tri_idx in sorted_faces:
-        idx = face_indices[tri_idx]  # 3 vertex indices of this triangle
+    for triangle in t_pos_idx:
+        idx = triangle  # 3 vertex indices of this triangle
 
         # Projected 2D positions for rasterization
         v_proj = verts2d[idx, :]  # 3 x 2 (integer pixel coords)
 
-        # Normals of the 3 vertices (3 x 3) -> transpose for 3 x 3 shape
+        # Normals of the 3 vertices (3 x 3)
         v_nrm = normals[:, idx].T  # shape: (3 vertices, 3 components)
 
         # Texture UV coords of the 3 vertices (3 x 2)
@@ -413,6 +469,9 @@ def render_object(
 
         # Original 3D vertex positions of the triangle (3 x 3)
         v_pos_3d = v_pos[:, idx].T  # shape: (3 vertices, 3 components)
+
+        # Vertex distances for depth interpolation (3,)
+        v_depth = vertex_distances[idx]
 
         if shader == "gouraud":
             img = shade_gouraud(
@@ -427,6 +486,8 @@ def render_object(
                 l_int,
                 l_amb,
                 img,
+                v_depth,
+                depth_buffer,
             )
         elif shader == "phong":
             img = shade_phong(
@@ -440,8 +501,11 @@ def render_object(
                 l_int,
                 l_amb,
                 img,
+                v_depth,
+                depth_buffer,
             )
         else:
             raise ValueError(f"Unknown shader: {shader}")
 
     return img
+
