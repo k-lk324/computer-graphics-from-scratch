@@ -24,7 +24,6 @@ def vector_interp(p1, p2, V1, V2, coord, dim):
     return V1 + t * (V2 - V1)
 
 
-# Barycentric coordinates calculation
 def edge_function(v0, v1, p):
     """
     Computes the edge function for a given edge and points.
@@ -37,7 +36,9 @@ def edge_function(v0, v1, p):
     Returns:
         np.ndarray: Signed areas, positive if point is on the left of the edge.
     """
-    return np.cross(v1 - v0, p - v0)
+    edge_vec = v1 - v0
+    pt_vec = p - v0
+    return edge_vec[0] * pt_vec[..., 1] - edge_vec[1] * pt_vec[..., 0]
 
 
 def f_shading(img, vertices, vcolors):

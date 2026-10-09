@@ -1,26 +1,9 @@
 # project3_utils.py
 
-import sys
-import types
 from typing import List, Tuple, Union
 import numpy as np
 from PIL import Image
 from project2_utils import lookat, perspective_project, rasterize
-
-if "trimesh" not in sys.modules:
-    try:
-        import trimesh  # noqa: F401
-    except ImportError:
-        trimesh_module = types.ModuleType("trimesh")
-        caching_module = types.ModuleType("trimesh.caching")
-
-        class TrackedArray(np.ndarray):
-            pass
-
-        caching_module.TrackedArray = TrackedArray
-        trimesh_module.caching = caching_module
-        sys.modules["trimesh"] = trimesh_module
-        sys.modules["trimesh.caching"] = caching_module
 
 
 class MatPhong:
