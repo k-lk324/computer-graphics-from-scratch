@@ -1,6 +1,10 @@
 # Computer Graphics from Scratch
 
-This repository contains modular Computer Graphics pipelines implemented from first principles in Python and NumPy. The projects cover 2D/3D affine transformations, camera simulation, perspective projection, continuous subpixel rasterization, Z-buffer depth testing, near-plane clipping, and illumination models (Flat, Gouraud, and Phong shading).
+This repository implements a modular Computer Graphics pipeline from first principles in Python and NumPy. The repository progresses across three stages of a graphics renderer:
+
+* **Project 1: 2D Rasterization & Barycentric Mapping**: Implements fundamental 2D triangle rasterization, screen-space barycentric coordinate calculation, flat color filling, and basic affine texture mapping.
+* **Project 2: 3D Transformations & Camera Geometry**: Introduces 3D coordinate spaces, rigid-body affine transformations, camera extrinsics and orientation matrices (`lookat`), perspective projection with integer pixel quantization, and triangle-order depth sorting (painter's algorithm).
+* **Project 3: Advanced Pipeline & Illumination**: Extends the pipeline with continuous subpixel rasterization, camera-space near-plane clipping, perspective-correct Z-buffering ($d = -Z_c$), and Gouraud vs. Phong illumination models with perspective-correct attribute interpolation.
 
 ---
 
